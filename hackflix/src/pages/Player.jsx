@@ -9,15 +9,16 @@ import {
   Loader2,
   AlertTriangle,
 } from "lucide-react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { ChaosControl } from "../components/chaos/ChaosControl";
 import { clsx } from "clsx";
 // import videojs from 'video.js'; // Not used in this simple HTML5 version, but keeping reference.
 
 export function Player() {
   const navigate = useNavigate();
-  const { id } = useParams();
+  // const { id } = useParams(); // Unused in this mock version
   const videoRef = useRef(null);
+  const audioRef = useRef(null); // External audio for chaos mode
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -51,8 +52,6 @@ export function Player() {
   };
 
   const toggleMute = () => {
-    if (!videoRef.current) return;
-    videoRef.current.muted = !isMuted;
     setIsMuted(!isMuted);
   };
 
@@ -77,19 +76,75 @@ export function Player() {
   };
 
   const handleTriggerAudioSync = () => {
-    setChaosState((prev) => {
-      const newState = { ...prev, audioSync: !prev.audioSync };
-      if (videoRef.current) {
-        // Simple simulation: mute the video but keep "playing" visual
-        videoRef.current.muted = newState.audioSync || isMuted;
-      }
-      return newState;
-    });
+    setChaosState((prev) => ({ ...prev, audioSync: !prev.audioSync }));
   };
 
   const handleTriggerCrash = () => {
     setChaosState((prev) => ({ ...prev, uiCrash: !prev.uiCrash }));
   };
+
+  // Audio Sync Simulation Effect
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (chaosState.audioSync) {
+      // 1. Enforce mute on main video
+      video.muted = true;
+
+      // 2. Create/Setup Audio element
+      if (!audioRef.current) {
+        audioRef.current = new Audio(video.src);
+        audioRef.current.loop = true;
+      }
+      const audio = audioRef.current;
+
+      // 3. Sync Logic (Run every time update)
+      const syncAudio = () => {
+        // Target: Video time - 5.0s delay (5000ms)
+        // If drift is > 0.5s, seek to correct time
+        const targetTime = Math.max(0, video.currentTime - 5.0);
+        if (Math.abs(audio.currentTime - targetTime) > 0.5) {
+          audio.currentTime = targetTime;
+        }
+      };
+
+      const handleVideoPlay = () => audio.play().catch(() => {});
+      const handleVideoPause = () => audio.pause();
+
+      video.addEventListener("timeupdate", syncAudio);
+      video.addEventListener("play", handleVideoPlay);
+      video.addEventListener("pause", handleVideoPause);
+
+      // Initial Sync
+      audio.muted = isMuted;
+      if (!video.paused) audio.play().catch(() => {});
+
+      return () => {
+        video.removeEventListener("timeupdate", syncAudio);
+        video.removeEventListener("play", handleVideoPlay);
+        video.removeEventListener("pause", handleVideoPause);
+        audio.pause();
+      };
+    } else {
+      // Cleanup Chaos
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      // Restore video mute state
+      video.muted = isMuted;
+    }
+  }, [chaosState.audioSync, isMuted]);
+
+  // Sync Audio Volume when not in chaos mode (or even in chaos mode for the external audio)
+  useEffect(() => {
+    if (chaosState.audioSync && audioRef.current) {
+      audioRef.current.muted = isMuted;
+    } else if (!chaosState.audioSync && videoRef.current) {
+      videoRef.current.muted = isMuted;
+    }
+  }, [isMuted, chaosState.audioSync]);
 
   // 3s Timer to hide controls
   useEffect(() => {
@@ -225,7 +280,7 @@ export function Player() {
       {/* Audio Sync Warning (Visual Indicator for validation) */}
       {chaosState.audioSync && (
         <div className="absolute top-4 right-20 text-yellow-500 bg-black/80 px-2 py-1 text-xs rounded border border-yellow-500">
-          ⚠️ Audio Sync Lag: 1200ms
+          ⚠️ Audio Sync Lag: 5000ms
         </div>
       )}
 

@@ -155,18 +155,20 @@ export function Home() {
               {category.movies.map((movie) => (
                 <div
                   key={movie.id}
-                  className="flex-none w-[200px] md:w-[240px] aspect-video relative group cursor-pointer transition-transform duration-300 hover:scale-110 hover:z-20 origin-center"
+                  className="flex-none w-[200px] md:w-[240px] group cursor-pointer transition-transform duration-300 hover:scale-105 hover:z-20"
                   onClick={() => navigate(`/watch/${movie.id}`)}
                 >
-                  <img
-                    src={movie.image}
-                    alt={movie.title}
-                    className="w-full h-full object-cover rounded-md shadow-lg"
-                  />
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded-md">
-                    <Play className="text-white w-12 h-12 fill-white opacity-80" />
+                  <div className="aspect-video relative rounded-md shadow-lg overflow-hidden">
+                    <img
+                      src={movie.image}
+                      alt={movie.title}
+                      className="w-full h-full object-cover"
+                    />
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                      <Play className="text-white w-12 h-12 fill-white opacity-80" />
+                    </div>
                   </div>
-                  <h3 className="mt-2 text-sm text-center text-gray-300 group-hover:text-white">
+                  <h3 className="mt-2 text-sm text-center text-gray-300 group-hover:text-white transition-colors">
                     {movie.title}
                   </h3>
                 </div>
