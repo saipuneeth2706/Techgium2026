@@ -1,4 +1,3 @@
-
 import logging
 import time
 import json
@@ -28,6 +27,8 @@ logger = logging.getLogger("VisionOneAgent")
 # Configure Gemini
 GENAI_KEY = os.getenv("GEMINI_API_KEY")
 if GENAI_KEY:
+    masked_key = GENAI_KEY[:4] + "*" * (len(GENAI_KEY) - 8) + GENAI_KEY[-4:] if len(GENAI_KEY) > 8 else "****"
+    logger.info(f"🔑 Gemini API Key loaded: {masked_key}")
     genai.configure(api_key=GENAI_KEY)
 else:
     logger.warning("⚠️ No GEMINI_API_KEY found. AI features will be disabled.")
@@ -73,6 +74,15 @@ class VisionOneAgent:
 
     def stop_session(self):
         """Cleanup resources."""
+        # Capture video path before closing context
+        try:
+            if self.page and self.page.video:
+                video_full_path = self.page.video.path()
+                self.report_data["video_filename"] = os.path.basename(video_full_path)
+                self._log_event("Video Capture", "Success", f"Session recording saved: {self.report_data['video_filename']}")
+        except Exception as e:
+            logger.error(f"Could not capture video path: {e}")
+
         if self.context:
             self.context.close()
         if self.browser:
@@ -102,6 +112,7 @@ class VisionOneAgent:
         except PlaywrightTimeoutError:
             logger.warning(f"⚠️ Selector '{selector}' failed. Attempting AI Self-Healing...")
             screenshot_path = self._take_screenshot(f"fail_{description.replace(' ', '_')}")
+            screenshot_filename = os.path.basename(screenshot_path) if screenshot_path else ""
             
             # 1. Ask Gemini for help
             ai_suggestion = self._ask_gemini(
@@ -131,7 +142,7 @@ class VisionOneAgent:
                     self.report_data["healed_count"] += 1
                     self.report_data["tests_run"] += 1
                     self.report_data["passes"] += 1
-                    self._log_event("Smart Click", "Healed", f"Clicked via text: {search_text}")
+                    self._log_event("Smart Click", "Healed", f"Clicked via text: {search_text}. Screenshot: {screenshot_filename}")
                 else:
                      raise Exception("Heuristic fallback failed: Element not found by text.")
 
@@ -139,7 +150,7 @@ class VisionOneAgent:
                 logger.error(f"❌ Smart Click Failed: Could not find '{description}' (AI tried: '{search_text}'). Error: {e}")
                 self.report_data["failures"] += 1
                 self.report_data["tests_run"] += 1
-                self._log_event("Smart Click", "Fail", str(e))
+                self._log_event("Smart Click", "Fail", f"{str(e)}. Screenshot: {screenshot_filename}")
                 self._take_screenshot(f"critical_fail_{description.replace(' ', '_')}")
 
     def analyze_video_stream(self):
@@ -175,11 +186,11 @@ class VisionOneAgent:
                  logger.info(f"Visual check passed. Black pixel ratio: {black_ratio:.1%}")
 
         if issues:
-            self._log_event("QoE Analysis", "Issues Found", ", ".join(issues))
+            self._log_event("QoE Analysis", "Issues Found", f"{', '.join(issues)}. Screenshot: {os.path.basename(screenshot_path)}")
             self.report_data["failures"] += 1 # Count specific QoE checks as checks? Or just log issues.
         else:
             logger.info("✅ QoE Analysis Passed: No anomalies detected.")
-            self._log_event("QoE Analysis", "Pass")
+            self._log_event("QoE Analysis", "Pass", f"Screenshot: {os.path.basename(screenshot_path)}")
             self.report_data["passes"] += 1
         
         self.report_data["tests_run"] += 1
