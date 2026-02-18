@@ -6,26 +6,27 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+VisionOne/.env
 
 # Node.js / React (hackflix)
-node_modules/
-dist/
-dist-ssr/
-*.local
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
+hackflix/node_modules/
+hackflix/dist/
+hackflix/dist-ssr/
+hackflix/*.local
+hackflix/npm-debug.log*
+hackflix/yarn-debug.log*
+hackflix/yarn-error.log*
+hackflix/pnpm-debug.log*
 
 # Python / VisionOne
-__pycache__/
-*.pyc
-.venv/
-venv/
-env/
-.pytest_cache/
-reports/
+VisionOne/__pycache__/
+VisionOne/*.pyc
+VisionOne/.venv/
+VisionOne/venv/
+VisionOne/env/
+VisionOne/.pytest_cache/
+VisionOne/reports/
 
 # IDEs
-.vscode/
-.idea/
+VisionOne/.vscode/
+VisionOne/.idea/
