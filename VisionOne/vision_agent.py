@@ -4,12 +4,15 @@ import json
 import os
 import cv2
 import numpy as np
+import base64
+import subprocess
+import socket
+import re
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-import google.generativeai as genai
+import ollama
 from dotenv import load_dotenv
-import PIL.Image
 
 # Load Environment Variables
 load_dotenv()
@@ -24,18 +27,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("VisionOneAgent")
 
-# Configure Gemini
-GENAI_KEY = os.getenv("GEMINI_API_KEY")
-if GENAI_KEY:
-    masked_key = GENAI_KEY[:4] + "*" * (len(GENAI_KEY) - 8) + GENAI_KEY[-4:] if len(GENAI_KEY) > 8 else "****"
-    logger.info(f"🔑 Gemini API Key loaded: {masked_key}")
-    genai.configure(api_key=GENAI_KEY)
-else:
-    logger.warning("⚠️ No GEMINI_API_KEY found. AI features will be disabled.")
-
 class VisionOneAgent:
-    def __init__(self, headless=False):
+    def __init__(self, headless=False, model="llama3.2-vision"):
         self.headless = headless
+        self.ai_model = model
         self.browser = None
         self.page = None
         self.playwright = None
@@ -50,6 +45,12 @@ class VisionOneAgent:
         }
         self.reports_dir = "reports"
         os.makedirs(self.reports_dir, exist_ok=True)
+        
+        # Ensure Ollama server is running locally
+        self._ensure_ollama_running()
+        
+        # We don't need API keys for Ollama as it runs locally on localhost:11434
+        logger.info(f"🤖 VisionOne initialized with LOCAL model: {self.ai_model}")
 
     def start_session(self, url="http://localhost:5173"):
         """Initialize Playwright and launch browser."""
@@ -98,60 +99,69 @@ class VisionOneAgent:
 
     def smart_click(self, selector, description):
         """
-        Self-Healing 'Find & Click' Mechanism.
-        Attempts to click selector. If fails, searches by text description.
+        Self-Healing 'Find & Click' Mechanism using Local Ollama Vision.
         """
         logger.info(f"Attempting to click: {description} ({selector})")
         try:
+            # Short timeout for the primary selector
             self.page.wait_for_selector(selector, timeout=2000)
             self.page.click(selector)
             logger.info(f"✅ Clicked element: {selector}")
             self._log_event("Smart Click", "Success", f"Clicked {selector}")
             self.report_data["tests_run"] += 1
             self.report_data["passes"] += 1
-        except PlaywrightTimeoutError:
-            logger.warning(f"⚠️ Selector '{selector}' failed. Attempting AI Self-Healing...")
+        except Exception:
+            logger.warning(f"⚠️ Selector '{selector}' failed. Attempting AI Self-Healing with LOCAL OLLAMA...")
             screenshot_path = self._take_screenshot(f"fail_{description.replace(' ', '_')}")
             screenshot_filename = os.path.basename(screenshot_path) if screenshot_path else ""
             
-            # 1. Ask Gemini for help
-            ai_suggestion = self._ask_gemini(
+            # 1. Ask LOCAL AI for help
+            ai_suggestion = self._ask_ai(
                 f"I am trying to click a button described as '{description}' but the selector '{selector}' failed. "
                 "Look at this screenshot. Is the button visible? If yes, what is the exact text on it? "
-                "Reply ONLY with the exact text I should search for. If not found, say 'NOT_FOUND'.", 
+                "Reply ONLY with the exact text I should search for, no punctuation at the end. If not found, say 'NOT_FOUND'.", 
                 screenshot_path
             )
 
-            # Heuristic Strategy (Modified by AI)
+            # Heuristic Strategy (Modified by AI or Fallback)
             search_text = description
             if ai_suggestion and "NOT_FOUND" not in ai_suggestion:
-                search_text = ai_suggestion.replace('"', '').strip() # Clean quotes
-                logger.info(f"✨ AI suggests searching for text: '{search_text}'")
+                logger.debug(f"Raw AI suggestion: '{ai_suggestion}'")
+                # Clean AI suggestions from punctuation that often breaks locators
+                search_text = re.sub(r'["\']', '', ai_suggestion).strip()
+                search_text = re.sub(r'[.,;!]$', '', search_text) 
+                logger.info(f"✨ Local AI suggests searching for text: '{search_text}'")
+            else:
+                logger.warning("🤖 Local AI suggestion unavailable or not found. Falling back to description text.")
 
-            # 2. Heuristic Fallback: Search by text (Original + AI Enhanced)
+            # 2. Heuristic Fallback
             try:
-                # Try finding button by exact text or partial text
-                element = self.page.get_by_text(search_text, exact=False).first
-                if not element.is_visible():
-                     # Try searching specifically for buttons with that name
-                     element = self.page.get_by_role("button", name=search_text).first
+                # Try finding by role first (more robust)
+                element = self.page.get_by_role("button", name=search_text, exact=False).first
                 
-                if element.is_visible():
-                    element.click()
+                # If not found or not visible, try by text
+                if element.count() == 0:
+                     logger.info(f"Role 'button' with name '{search_text}' not found. Trying direct text match...")
+                     element = self.page.get_by_text(search_text, exact=False).first
+                
+                # Check for existence before action
+                if element.count() > 0:
+                    # Scroll and try to click
+                    element.scroll_into_view_if_needed()
+                    element.click(force=True) # Use force=True to bypass potential overlay issues if AI is confident
                     logger.info(f"✅ Self-Healed: Clicked element based on text match: '{search_text}'")
                     self.report_data["healed_count"] += 1
                     self.report_data["tests_run"] += 1
                     self.report_data["passes"] += 1
                     self._log_event("Smart Click", "Healed", f"Clicked via text: {search_text}. Screenshot: {screenshot_filename}")
                 else:
-                     raise Exception("Heuristic fallback failed: Element not found by text.")
+                     raise Exception(f"Element '{search_text}' not found via role or text.")
 
             except Exception as e:
-                logger.error(f"❌ Smart Click Failed: Could not find '{description}' (AI tried: '{search_text}'). Error: {e}")
+                logger.error(f"❌ Smart Click Failed: Could not find '{description}'. Error: {e}")
                 self.report_data["failures"] += 1
                 self.report_data["tests_run"] += 1
                 self._log_event("Smart Click", "Fail", f"{str(e)}. Screenshot: {screenshot_filename}")
-                self._take_screenshot(f"critical_fail_{description.replace(' ', '_')}")
 
     def analyze_video_stream(self):
         """
@@ -171,7 +181,6 @@ class VisionOneAgent:
             issues.append("DRM_Error")
         
         # 2. Buffering Detection (DOM based)
-        # Looking for the generic loader or specific lucide class
         if self.page.locator(".animate-spin").is_visible():
              logger.warning("⚠️ Buffering Detected (Spinner visible)")
              issues.append("Buffering")
@@ -180,14 +189,18 @@ class VisionOneAgent:
         if screenshot_path:
             is_black_screen, black_ratio = self._is_black_screen(screenshot_path)
             if is_black_screen:
-                logger.error(f"🚩 CRITICAL: Black Screen Detected ({black_ratio:.1%} black pixels)")
-                issues.append("Black_Screen")
+                # If it's a DRM error, a black screen is expected/part of the error UI
+                if "DRM_Error" in issues:
+                    logger.info("Black screen detected but ignored as it is part of the DRM Error UI.")
+                else:
+                    logger.error(f"🚩 CRITICAL: Black Screen Detected ({black_ratio:.1%} black pixels)")
+                    issues.append("Black_Screen")
             else:
                  logger.info(f"Visual check passed. Black pixel ratio: {black_ratio:.1%}")
 
         if issues:
             self._log_event("QoE Analysis", "Issues Found", f"{', '.join(issues)}. Screenshot: {os.path.basename(screenshot_path)}")
-            self.report_data["failures"] += 1 # Count specific QoE checks as checks? Or just log issues.
+            self.report_data["failures"] += 1
         else:
             logger.info("✅ QoE Analysis Passed: No anomalies detected.")
             self._log_event("QoE Analysis", "Pass", f"Screenshot: {os.path.basename(screenshot_path)}")
@@ -198,31 +211,25 @@ class VisionOneAgent:
     def trigger_chaos(self, mode):
         """
         Triggers a specific chaos mode via the UI.
-        Modes: 'Trigger Buffering', 'Trigger DRM Error', 'Audio Sync Issue', 'UI Crash'
         """
         logger.info(f"Injecting Chaos: {mode}")
         try:
-             # 1. Open Chaos Menu (Assuming the red bug button)
-             # We rely on visual attributes or a stable class since ID isn't explicitly 'chaos-toggle' in current code, 
-             # but we can deduce it from the class 'bg-red-600 rounded-full'.
-             # Better yet, let's use the icon detection or a specific selector if we knew it.
-             # Based on previous code: button with <Bug> icon.
-             
+             # Ensure menu is open - use force=True in case overlays are present
              menu_button = self.page.locator("button:has(svg.lucide-bug)")
-             if not menu_button.is_visible():
-                 logger.warning("Chaos menu button not found!")
-                 return
+             menu_content = self.page.locator("h3:has-text('Chaos Mode')")
+             
+             if not menu_content.is_visible():
+                 menu_button.click(force=True)
+                 self.page.wait_for_selector("h3:has-text('Chaos Mode')", timeout=5000)
 
-             menu_button.click()
-             time.sleep(0.5) # Animation
-
-             # 2. Click the specific mode button text
-             self.page.get_by_text(mode, exact=False).click()
+             # Click the specific mode button
+             self.page.get_by_text(mode, exact=False).click(force=True)
              logger.info(f"✅ Triggered Chaos Mode: {mode}")
              self._log_event("Chaos Injection", "Success", mode)
              
-             # Close menu to clear view if needed (clicking toggle again or outside)
-             # menu_button.click() 
+             # Close the menu
+             menu_button.click(force=True)
+             time.sleep(0.5)
 
         except Exception as e:
             logger.error(f"❌ Failed to trigger chaos: {e}")
@@ -238,50 +245,41 @@ class VisionOneAgent:
                 return False, 0.0
             
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            # Count pixels that are effectively black (very low luminance, < 10)
-            non_zero = cv2.countNonZero(gray)
-            total_pixels = gray.size
-            
-            # Simple threshold: if pixel value < 10, consider it black
-            # Better approach: countnonZero returns NON-black. 
-            # So black pixels = total - non_zero (if we threshold first)
-            
             # Threshold image to pure black/white: values < 10 become 0, else 255
             _, thresh = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
             non_black = cv2.countNonZero(thresh)
-            black_ratio = 1 - (non_black / total_pixels)
+            black_ratio = 1 - (non_black / gray.size)
             
             return black_ratio > threshold, black_ratio
         except Exception as e:
             logger.error(f"Image processing error: {e}")
             return False, 0.0
 
-    def _ask_gemini(self, prompt, image_path):
+    def _ask_ai(self, prompt, image_path):
         """
-        Queries Gemini 1.5 Flash with text and image.
+        Queries Local Ollama with text and image.
         Returns text response.
         """
-        if not GENAI_KEY:
-            return None
-
         try:
-            logger.info("🧠 Asking Gemini...")
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            logger.info(f"🧠 Asking Local Ollama ({self.ai_model})...")
             
-            # Read image
             if not os.path.exists(image_path):
                 return None
-                
-            # Uploading image effectively by passing bytes or path depending on SDK version.
-            # standard PIL or path usually works. Let's use Pillow.
-            import PIL.Image
-            img = PIL.Image.open(image_path)
             
-            response = model.generate_content([prompt, img])
-            logger.info(f"🤖 Gemini says: {response.text.strip()}")
-            return response.text.strip()
+            with open(image_path, 'rb') as img_file:
+                img_data = img_file.read()
+            
+            response = ollama.generate(
+                model=self.ai_model,
+                prompt=prompt,
+                images=[img_data]
+            )
+            
+            ai_text = response['response'].strip()
+            logger.info(f"🤖 Local AI says: {ai_text}")
+            return ai_text
         except Exception as e:
-            logger.error(f"❌ Gemini Error: {e}")
+            logger.error(f"❌ Local Ollama Error: {e}. Ensure 'ollama serve' is running!")
             return None
 
     def _take_screenshot(self, name):
@@ -302,31 +300,64 @@ class VisionOneAgent:
             "details": details
         })
 
+    def _ensure_ollama_running(self):
+        """Checks if Ollama server is running, and starts it if not."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex(('127.0.0.1', 11434))
+        sock.close()
+
+        if result == 0:
+            logger.info("✅ Ollama server is already running.")
+        else:
+            logger.info("🚀 Starting Ollama server in background...")
+            try:
+                # Start ollama serve as a detached process
+                subprocess.Popen(
+                    ["ollama", "serve"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+                
+                # Wait for server to start (up to 30 seconds)
+                for i in range(30):
+                    time.sleep(1)
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(1)
+                    if sock.connect_ex(('127.0.0.1', 11434)) == 0:
+                        sock.close()
+                        logger.info("✅ Ollama server started successfully.")
+                        return
+                    sock.close()
+                
+                logger.error("❌ Failed to start Ollama server after 30 seconds.")
+            except Exception as e:
+                logger.error(f"❌ Error starting Ollama: {e}")
+
 if __name__ == "__main__":
     # Main Execution Block
-    agent = VisionOneAgent(headless=False)
+    # Using Llama 3.2 Vision (Local via Ollama)
+    agent = VisionOneAgent(headless=False, model="llama3.2-vision")
     
     try:
         # 1. Start Session
         agent.start_session("http://localhost:5173")
         
         # 2. Login Flow (Self-Healing Test)
-        # Fill Dummy Credentials (just in case validation is added later)
         agent.page.fill("input[type='email']", "qa@hackflix.com")
         agent.page.fill("input[type='password']", "chaos_mode_123")
         
         # Intentionally using a broken selector to test healing
-        # There is no ID #msg-btn-login in the real app, so this should trigger healing searching for "Sign In"
         agent.smart_click("#msg-btn-login", "Sign In") 
         
-        # Wait for navigation
-        agent.page.wait_for_url("**/browse", timeout=5000)
+        # Increase timeout to 10s for slower environments
+        agent.page.wait_for_url("**/browse", timeout=10000)
         
         # 3. Play Video
-        # Click the 'Play' button on the Hero Banner
         agent.smart_click("button:has-text('Play')", "Play")
         agent.page.wait_for_url("**/watch/*", timeout=5000)
-        time.sleep(3) # Watch for a bit
+        time.sleep(6) # Increased wait to allow video to start rendering
         
         # 4. Analyze Normal Stream
         agent.analyze_video_stream()
@@ -346,9 +377,7 @@ if __name__ == "__main__":
         agent.page.reload()
         time.sleep(2)
         
-        # 7. Chaos Test: Black Screen (Simulated by UI Crash or just checking logic)
-        # Note: UI Crash hides button, doesn't cause black screen. 
-        # But we can run the analysis anyway.
+        # 7. Chaos Test: Black Screen
         agent.trigger_chaos("UI Crash")
         time.sleep(1)
         agent.analyze_video_stream()
